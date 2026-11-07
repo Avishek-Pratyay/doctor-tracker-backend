@@ -11,11 +11,12 @@ const {
   getDoctorFilterOptions,
 } = require('../controllers/doctorController');
 const { protect } = require('../middleware/auth');
+const { doctorRules, validate } = require('../middleware/validator');
 
 // Protect all doctor routes
 router.use(protect);
 
-router.route('/').get(getDoctors).post(createDoctor);
+router.route('/').get(getDoctors).post(doctorRules, validate, createDoctor);
 router.route('/filters').get(getDoctorFilterOptions);
 router.route('/:id').get(getDoctorById).put(updateDoctor).delete(deleteDoctor);
 

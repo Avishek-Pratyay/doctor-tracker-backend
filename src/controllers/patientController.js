@@ -1,5 +1,7 @@
+const mongoose = require('mongoose');
 const Patient = require('../models/Patient');
 const Doctor = require('../models/Doctor');
+const mockData = require('../mockData');
 
 // @desc    Get all patients with search, filtering, and pagination
 // @route   GET /api/patients
@@ -22,9 +24,81 @@ exports.getPatients = async (req, res, next) => {
       sortOrder = 'desc',
     } = req.query;
 
+    if (mongoose.connection.readyState !== 1) {
+      let list = [...mockData.getPatients()];
+      const docs = mockData.getDoctors();
+
+      // Search functionality
+      if (search && search.trim() !== '') {
+        const s = search.toLowerCase();
+        list = list.filter(
+          (p) =>
+            p.name.toLowerCase().includes(s) ||
+            p.condition.toLowerCase().includes(s) ||
+            p.phone.includes(s) ||
+            (p.email && p.email.toLowerCase().includes(s))
+        );
+      }
+
+      if (condition && condition !== 'All') {
+        list = list.filter((p) => p.condition === condition);
+      }
+
+      if (status && status !== 'All') {
+        list = list.filter((p) => p.status === status);
+      }
+
+      if (gender && gender !== 'All') {
+        list = list.filter((p) => p.gender === gender);
+      }
+
+      if (doctor && doctor !== 'All') {
+        list = list.filter((p) => p.doctor === doctor);
+      }
+
+      if (startDate) {
+        list = list.filter((p) => new Date(p.admissionDate) >= new Date(startDate));
+      }
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        list = list.filter((p) => new Date(p.admissionDate) <= end);
+      }
+
+      const total = list.length;
+      const pages = Math.ceil(total / limit) || 1;
+      const paginated = list.slice(skip, skip + limit).map((p) => {
+        const d = docs.find((doc) => doc._id === p.doctor);
+        return {
+          ...p,
+          doctor: d
+            ? {
+                _id: d._id,
+                name: d.name,
+                specialization: d.specialization,
+                hospital: d.hospital,
+              }
+            : null,
+        };
+      });
+
+      return res.status(200).json({
+        success: true,
+        count: paginated.length,
+        pagination: {
+          total,
+          page,
+          pages,
+          limit,
+          hasNext: page < pages,
+          hasPrev: page > 1,
+        },
+        data: paginated,
+      });
+    }
+
     const query = {};
 
-    // Search functionality (name, condition, phone, email)
     if (search && search.trim() !== '') {
       const regex = new RegExp(search.trim(), 'i');
       query.$or = [
@@ -35,32 +109,14 @@ exports.getPatients = async (req, res, next) => {
       ];
     }
 
-    // Filter by Condition
-    if (condition && condition !== 'All') {
-      query.condition = condition;
-    }
+    if (condition && condition !== 'All') query.condition = condition;
+    if (status && status !== 'All') query.status = status;
+    if (gender && gender !== 'All') query.gender = gender;
+    if (doctor && doctor !== 'All') query.doctor = doctor;
 
-    // Filter by Status
-    if (status && status !== 'All') {
-      query.status = status;
-    }
-
-    // Filter by Gender
-    if (gender && gender !== 'All') {
-      query.gender = gender;
-    }
-
-    // Filter by Doctor ID
-    if (doctor && doctor !== 'All') {
-      query.doctor = doctor;
-    }
-
-    // Date-wise filtering (by admissionDate or createdAt)
     if (startDate || endDate) {
       query.admissionDate = {};
-      if (startDate) {
-        query.admissionDate.$gte = new Date(startDate);
-      }
+      if (startDate) query.admissionDate.$gte = new Date(startDate);
       if (endDate) {
         const end = new Date(endDate);
         end.setHours(23, 59, 59, 999);
@@ -68,11 +124,9 @@ exports.getPatients = async (req, res, next) => {
       }
     }
 
-    // Dynamic sort
     const sort = {};
     sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
 
-    // Execute count and query concurrently
     const [total, patients] = await Promise.all([
       Patient.countDocuments(query),
       Patient.find(query)
@@ -108,6 +162,18 @@ exports.getPatients = async (req, res, next) => {
 // @access  Private
 exports.getPatientById = async (req, res, next) => {
   try {
+    if (mongoose.connection.readyState !== 1) {
+      const pat = mockData.getPatients().find((p) => p._id === req.params.id);
+      if (!pat) {
+        return res.status(404).json({ success: false, message: 'Patient not found' });
+      }
+      const doc = mockData.getDoctors().find((d) => d._id === pat.doctor);
+      return res.status(200).json({
+        success: true,
+        data: { ...pat, doctor: doc },
+      });
+    }
+
     const patient = await Patient.findById(req.params.id).populate(
       'doctor',
       'name specialization hospital email phone'
@@ -137,7 +203,27 @@ exports.createPatient = async (req, res, next) => {
     const { name, age, gender, condition, phone, email, doctor, status, admissionDate, notes } =
       req.body;
 
-    // Verify assigned doctor exists
+    if (mongoose.connection.readyState !== 1) {
+      const newPat = mockData.addPatient({
+        name,
+        age: Number(age),
+        gender,
+        condition,
+        phone,
+        email: email || '',
+        doctor,
+        status: status || 'Active',
+        admissionDate: admissionDate || new Date(),
+        notes: notes || '',
+      });
+      const d = mockData.getDoctors().find((doc) => doc._id === doctor);
+      return res.status(201).json({
+        success: true,
+        message: 'Patient registered successfully (in-memory mode)',
+        data: { ...newPat, doctor: d },
+      });
+    }
+
     const doctorExists = await Doctor.findById(doctor);
     if (!doctorExists) {
       return res.status(400).json({
@@ -174,13 +260,25 @@ exports.createPatient = async (req, res, next) => {
   }
 };
 
-// @desc    Update patient information
+// @desc    Update patient
 // @route   PUT /api/patients/:id
 // @access  Private
 exports.updatePatient = async (req, res, next) => {
   try {
-    let patient = await Patient.findById(req.params.id);
+    if (mongoose.connection.readyState !== 1) {
+      const updated = mockData.updatePatient(req.params.id, req.body);
+      if (!updated) {
+        return res.status(404).json({ success: false, message: 'Patient not found' });
+      }
+      const d = mockData.getDoctors().find((doc) => doc._id === updated.doctor);
+      return res.status(200).json({
+        success: true,
+        message: 'Patient updated successfully (in-memory mode)',
+        data: { ...updated, doctor: d },
+      });
+    }
 
+    let patient = await Patient.findById(req.params.id);
     if (!patient) {
       return res.status(404).json({
         success: false,
@@ -218,8 +316,16 @@ exports.updatePatient = async (req, res, next) => {
 // @access  Private
 exports.deletePatient = async (req, res, next) => {
   try {
-    const patient = await Patient.findById(req.params.id);
+    if (mongoose.connection.readyState !== 1) {
+      mockData.deletePatient(req.params.id);
+      return res.status(200).json({
+        success: true,
+        message: 'Patient deleted successfully (in-memory mode)',
+        data: {},
+      });
+    }
 
+    const patient = await Patient.findById(req.params.id);
     if (!patient) {
       return res.status(404).json({
         success: false,
@@ -244,6 +350,27 @@ exports.deletePatient = async (req, res, next) => {
 // @access  Private
 exports.getPatientFilterOptions = async (req, res, next) => {
   try {
+    if (mongoose.connection.readyState !== 1) {
+      const pats = mockData.getPatients();
+      const docs = mockData.getDoctors();
+      const conditions = Array.from(new Set(pats.map((p) => p.condition))).sort();
+      const statuses = Array.from(new Set(pats.map((p) => p.status))).sort();
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          conditions,
+          statuses,
+          doctors: docs.map((d) => ({
+            id: d._id,
+            name: d.name,
+            specialization: d.specialization,
+            hospital: d.hospital,
+          })),
+        },
+      });
+    }
+
     const [conditions, statuses, doctors] = await Promise.all([
       Patient.distinct('condition'),
       Patient.distinct('status'),
